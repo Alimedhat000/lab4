@@ -3,6 +3,27 @@ import time
 import uuid
 import multiprocessing
 import random
+import logging
+import os
+from datetime import datetime
+
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+
+# Generate a log filename with timestamp
+log_filename = f"logs/redlock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+# Set up logging to both file and console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 
 client_processes_waiting = [0, 1, 1, 1, 4]
 
