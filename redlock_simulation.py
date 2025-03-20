@@ -42,7 +42,16 @@ class Redlock:
         self.redis_clients = []
         self.resource=None
         self.__lock_id=None
+        self.retry_times = 3
         self.quorum = len(self.redis_nodes) // 2 + 1
+        
+        self.unlock_script = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        else
+            return 0
+        end
+        """
         
         for host, port in self.redis_nodes:
             try:
@@ -61,13 +70,14 @@ class Redlock:
         """
         # lock_key should be random and unique
         self.__lock_id = uuid.uuid4().hex
+        self.resource = resource
 
         for retry in range(self.retry_times + 1):
             acquired_node_count = 0
             start_time = time.monotonic()
 
             try:
-                for node in self.redis_nodes:
+                for node in self.redis_clients:
                     if self.acquire_node(node,ttl):
                         acquired_node_count += 1
                 
@@ -86,12 +96,10 @@ class Redlock:
                         return True, self.__lock_id
                 else:
                     logger.warning(f"Failed to acquire lock on resource '{resource}', releasing partial locks")
-                    for node in self.redis_nodes:
-                        self.release_node(node)
+                    for i, node in enumerate(self.redis_clients):
+                        self.release_node(node, i)
                     time.sleep(random.randint(0, DEFAULT_RETRY_DELAY) / 1000)
                     
-                    
-                        
             except Exception as e:
                     
                     logger.error(f"Error acquiring lock on resource '{resource}': {e}")
@@ -110,12 +118,12 @@ class Redlock:
         
         for i, client in enumerate(self.redis_clients):
             try:
-                self.release_node(client)
+                self.release_node(client ,i)
                 logger.info(f"Lock '{resource} with ID {lock_id} released on node {i + 1}")
             except Exception as e:
                 logger.error(f"Failed to release lock on node {i + 1}")
     
-    def acquire_node(self, node,ttl):
+    def acquire_node(self, node, ttl):
         """
         acquire a single redis node
         """
@@ -125,36 +133,37 @@ class Redlock:
             logger.error(f"Error acquiring lock on node {node}: {e}")
             return False
 
-    def release_node(self, node):
+    def release_node(self, node, index):
         """
         release a single redis node
         """
         try:
-            node._release_script(keys=[self.resource], args=[self.__lock_id])
-            logger.info(f"Lock released on node {node}")
+            script = node.register_script(self.unlock_script)
+            script(keys=[self.resource], args=[self.__lock_id])
+            logger.info(f"Lock released on node {index}")
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
-            logger.error(f"Error releasing lock on node {node}: {e}")
+            logger.error(f"Error releasing lock on node {index}: {e}")
 
 
 def client_process(redis_nodes, resource, ttl, client_id):
+    
     """
     Function to simulate a single client process trying to acquire and release a lock.
     """
     time.sleep(client_processes_waiting[client_id])
 
     redlock = Redlock(redis_nodes)
-    print(f"\nClient-{client_id}: Attempting to acquire lock...")
+    logger.info(f"\nClient-{client_id}: Attempting to acquire lock...")
     lock_acquired, lock_id = redlock.acquire_lock(resource, ttl)
 
     if lock_acquired:
-        print(f"\nClient-{client_id}: Lock acquired! Lock ID: {lock_id}")
+        logger.info(f"\nClient-{client_id}: Lock acquired! Lock ID: {lock_id}")
         # Simulate critical section
         time.sleep(3)  # Simulate some work
         redlock.release_lock(resource, lock_id)
         logger.info(f"\nClient-{client_id}: Lock released!")
-        print(f"\nClient-{client_id}: Lock released!")
+        logger.info(f"\nClient-{client_id}: Lock released!")
     else:
-        print(f"\nClient-{client_id}: Failed to acquire lock.")
         logger.warning(f"\nClient-{client_id}: Failed to acquire lock.")
 
 
