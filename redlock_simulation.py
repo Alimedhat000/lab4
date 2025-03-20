@@ -105,7 +105,15 @@ class Redlock:
         :param resource: The name of the resource to unlock.
         :param lock_id: The unique lock ID to verify ownership.
         """
-        pass
+        if not lock_id:
+            return
+        
+        for i, client in enumerate(self.redis_clients):
+            try:
+                self.release_node(client)
+                logger.info(f"Lock '{resource} with ID {lock_id} released on node {i + 1}")
+            except Exception as e:
+                logger.error(f"Failed to release lock on node {i + 1}")
     
     def acquire_node(self, node,ttl):
         """
