@@ -40,9 +40,8 @@ class Redlock:
         """
         self.redis_nodes=redis_nodes
         self.redis_clients = []
-        self.resource=None
-        self.__lock_id=None
-        self.__ttl=None
+        self.resource = None
+        self.__lock_id = None
         self.quorum = len(self.redis_nodes) // 2 + 1
         
         for host, port in self.redis_nodes:
@@ -53,7 +52,7 @@ class Redlock:
             except Exception as e:
                 logger.error(f"Failed to connect to Redis node {host}:{port}  : {e}")
 
-    def acquire_lock(self, resource, ttl):
+    def acquire_lock(self, resource, ttl=DEFAULT_TTL):
         """
         Try to acquire a distributed lock.
         :param resource: The name of the resource to lock.
@@ -69,24 +68,24 @@ class Redlock:
 
             # acquire the lock in all the redis instances sequentially
             for node in self.redis_nodes:
-                if self.acquire_node(node):
+                if self.acquire_node(node,ttl):
                     acquired_node_count += 1
 
             end_time = time.monotonic()
             elapsed_milliseconds = (end_time - start_time) * 10**3
 
-            # Add 2 milliseconds to the drift to account for Redis expires
-            # precision, which is 1 milliescond, plus 1 millisecond min drift
-            # for small TTLs.
-            drift = (self.__ttl * CLOCK_DRIFT_FACTOR) + 2
-
-            validity = self.__ttl - (elapsed_milliseconds + drift)
-            if acquired_node_count >= self.quorum and validity > 0:
-                return True, validity
-            else:
-                for node in self.redis_nodes:
-                    self.release_node(node)
-                time.sleep(random.randint(0, self.retry_delay) / 1000)
+                drift = (ttl * CLOCK_DRIFT_FACTOR) + 2
+                validity = ttl - (elapsed_milliseconds + drift)
+                
+                if acquired_node_count >= self.quorum and validity > 0:
+                    logger.info(f"Lock acquired on resource '{resource}' with ID {self.__lock_id}")
+                    return True, self.__lock_id
+                else:
+                    logger.warning(f"Failed to acquire lock on resource '{resource}', releasing partial locks")
+                    for node in self.redis_nodes:
+                        self.release_node(node)
+                    time.sleep(random.randint(0, DEFAULT_RETRY_DELAY) / 1000)
+            except Exception as e:
                 
         return False, None
 
@@ -106,11 +105,12 @@ class Redlock:
             except Exception as e:
                 logger.error(f"Failed to release lock on node {i + 1}")
     
-    def acquire_node(self, node):
+    def acquire_node(self, node,ttl):
         """
         acquire a single redis node
         """
         try:
+            return node.set(self.resource, self.__lock_id, nx=True, px=ttl)
             return node.set(self.resource, self.lock_key, nx=True, px=self.__ttl)
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
             logger.error(f"Connection error when acquiring lock: {e}")
@@ -142,9 +142,9 @@ def client_process(redis_nodes, resource, ttl, client_id):
         # Simulate critical section
         time.sleep(3)  # Simulate some work
         redlock.release_lock(resource, lock_id)
-        print(f"\nClient-{client_id}: Lock released!")
+        logger.info(f"Client-{client_id}: Lock released!")
     else:
-        print(f"\nClient-{client_id}: Failed to acquire lock.")
+        logger.warning(f"Client-{client_id}: Failed to acquire lock.")
 
 if __name__ == "__main__":
     # Define Redis node addresses (host, port)
