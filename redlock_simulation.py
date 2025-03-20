@@ -24,6 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 client_processes_waiting = [0, 1, 1, 1, 4]
 
 DEFAULT_RETRY_TIMES = 3
@@ -37,56 +38,63 @@ class Redlock:
         Initialize Redlock with a list of Redis node addresses.
         :param redis_nodes: List of (host, port) tuples.
         """
-        self.redis_nodes = redis_nodes
+        self.redis_nodes=redis_nodes
         self.redis_clients = []
-        self.resource = None
-        self.__lock_id = None
+        self.resource=None
+        self.__lock_id=None
         self.quorum = len(self.redis_nodes) // 2 + 1
         
         for host, port in self.redis_nodes:
             try:
-                client = redis.Redis(host=host, port=port)
+                client = redis.Redis(host=host,port=port)
                 self.redis_clients.append(client)
                 logger.info(f"Connected to Redis node {host}:{port}")
             except Exception as e:
                 logger.error(f"Failed to connect to Redis node {host}:{port}  : {e}")
 
-    def acquire_lock(self, resource, ttl=DEFAULT_TTL):
+    def acquire_lock(self, resource, ttl):
         """
         Try to acquire a distributed lock.
         :param resource: The name of the resource to lock.
         :param ttl: Time-to-live for the lock in milliseconds.
         :return: Tuple (lock_acquired, lock_id).
         """
+        # lock_key should be random and unique
         self.__lock_id = uuid.uuid4().hex
-        self.resource = resource
 
-        for retry in range(DEFAULT_RETRY_TIMES + 1):
+        for retry in range(self.retry_times + 1):
             acquired_node_count = 0
             start_time = time.monotonic()
 
             try:
                 for node in self.redis_nodes:
-                    if self.acquire_node(node):
+                    if self.acquire_node(node,ttl):
                         acquired_node_count += 1
                 
                 end_time = time.monotonic()
                 elapsed_milliseconds = (end_time - start_time) * 10**3
 
+
+                # Add 2 milliseconds to the drift to account for Redis expires
+                # precision, which is 1 milliescond, plus 1 millisecond min drift
+                # for small TTLs.
                 drift = (ttl * CLOCK_DRIFT_FACTOR) + 2
+
                 validity = ttl - (elapsed_milliseconds + drift)
-                
                 if acquired_node_count >= self.quorum and validity > 0:
-                    logger.info(f"Lock acquired on resource '{resource}' with ID {self.__lock_id}")
-                    return True, self.__lock_id
+                        logger.info(f"Lock acquired on resource '{resource}' with ID {self.__lock_id}")
+                        return True, self.__lock_id
                 else:
                     logger.warning(f"Failed to acquire lock on resource '{resource}', releasing partial locks")
                     for node in self.redis_nodes:
                         self.release_node(node)
                     time.sleep(random.randint(0, DEFAULT_RETRY_DELAY) / 1000)
+                    
+                    
+                        
             except Exception as e:
-                
-                logger.error(f"Error acquiring lock on resource '{resource}': {e}")
+                    
+                    logger.error(f"Error acquiring lock on resource '{resource}': {e}")
         
         logger.warning(f"Lock acquisition failed after retries for resource '{resource}'")
         return False, self.__lock_id
@@ -96,16 +104,8 @@ class Redlock:
         Release the distributed lock.
         :param resource: The name of the resource to unlock.
         :param lock_id: The unique lock ID to verify ownership.
-        """ 
-        if not lock_id:
-            return
-        
-        for i, client in enumerate(self.redis_clients):
-            try:
-                self.release_node(client)
-                logger.info(f"Lock '{resource} with ID {lock_id} released on node {i + 1}")
-            except Exception as e:
-                logger.error(f"Failed to release lock on node {i + 1}")
+        """
+        pass
     
     def acquire_node(self, node,ttl):
         """
@@ -113,21 +113,20 @@ class Redlock:
         """
         try:
             return node.set(self.resource, self.__lock_id, nx=True, px=ttl)
-            return node.set(self.resource, self.lock_key, nx=True, px=self.__ttl)
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
-            logger.error(f"Connection error when acquiring lock: {e}")
+            logger.error(f"Error acquiring lock on node {node}: {e}")
             return False
 
     def release_node(self, node):
         """
         release a single redis node
         """
-        # use the lua script to release the lock in a safe way
         try:
-            node._release_script(keys=[self.resource], args=[self.lock_key])
+            node._release_script(keys=[self.resource], args=[self.__lock_id])
+            logger.info(f"Lock released on node {node}")
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
-            logger.error(f"Connection error when acquiring lock: {e}")
-            
+            logger.error(f"Error releasing lock on node {node}: {e}")
+
 
 def client_process(redis_nodes, resource, ttl, client_id):
     """
@@ -136,18 +135,23 @@ def client_process(redis_nodes, resource, ttl, client_id):
     time.sleep(client_processes_waiting[client_id])
 
     redlock = Redlock(redis_nodes)
-    logger.info(f"Client-{client_id}: Attempting to acquire lock...")
+    print(f"\nClient-{client_id}: Attempting to acquire lock...")
     lock_acquired, lock_id = redlock.acquire_lock(resource, ttl)
 
     if lock_acquired:
-        logger.info(f"Client-{client_id}: Lock acquired! Lock ID: {lock_id}")
+        print(f"\nClient-{client_id}: Lock acquired! Lock ID: {lock_id}")
+        # Simulate critical section
         time.sleep(3)  # Simulate some work
         redlock.release_lock(resource, lock_id)
-        logger.info(f"Client-{client_id}: Lock released!")
+        logger.info(f"\nClient-{client_id}: Lock released!")
+        print(f"\nClient-{client_id}: Lock released!")
     else:
-        logger.warning(f"Client-{client_id}: Failed to acquire lock.")
+        print(f"\nClient-{client_id}: Failed to acquire lock.")
+        logger.warning(f"\nClient-{client_id}: Failed to acquire lock.")
+
 
 if __name__ == "__main__":
+    # Define Redis node addresses (host, port)
     redis_nodes = [
         ("localhost", 63791),
         ("localhost", 63792),
@@ -159,8 +163,10 @@ if __name__ == "__main__":
     resource = "shared_resource"
     ttl = 5000  # Lock TTL in milliseconds (5 seconds)
 
+    # Number of client processes
     num_clients = 5
 
+    # Start multiple client processes
     processes = []
     for i in range(num_clients):
         process = multiprocessing.Process(target=client_process, args=(redis_nodes, resource, ttl, i))
