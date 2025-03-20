@@ -39,10 +39,19 @@ class Redlock:
         :param redis_nodes: List of (host, port) tuples.
         """
         self.redis_nodes=redis_nodes
+        self.redis_clients = []
         self.resource=None
         self.__lock_id=None
         self.__ttl=None
         self.quorum = len(self.redis_nodes) // 2 + 1
+        
+        for host, port in self.redis_nodes:
+            try:
+                client = redis.Redis(host=host,port=port)
+                self.redis_clients.append(client)
+                logger.info(f"Connected to Redis node {host}:{port}")
+            except Exception as e:
+                logger.error(f"Failed to connect to Redis node {host}:{port}  : {e}")
 
     def acquire_lock(self, resource, ttl):
         """
