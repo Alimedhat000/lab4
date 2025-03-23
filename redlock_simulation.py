@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 client_processes_waiting = [0, 1, 1, 1, 4]
 
-DEFAULT_RETRY_TIMES = 3
+DEFAULT_RETRY_TIMES = 10
 DEFAULT_RETRY_DELAY = 200
 DEFAULT_TTL = 100000
 CLOCK_DRIFT_FACTOR = 0.01
@@ -77,8 +77,8 @@ class Redlock:
             start_time = time.monotonic()
 
             try:
-                for node in self.redis_clients:
-                    if self.acquire_node(node,ttl):
+                for i, node in enumerate(self.redis_clients):
+                    if self.acquire_node(node, i,ttl):
                         acquired_node_count += 1
                 
                 end_time = time.monotonic()
@@ -123,14 +123,14 @@ class Redlock:
             except Exception as e:
                 logger.error(f"Failed to release lock on node {i + 1}")
     
-    def acquire_node(self, node, ttl):
+    def acquire_node(self, node, index,ttl):
         """
         acquire a single redis node
         """
         try:
             return node.set(self.resource, self.__lock_id, nx=True, px=ttl)
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
-            logger.error(f"Error acquiring lock on node {node}: {e}")
+            logger.error(f"Error acquiring lock on node {index}: {e}")
             return False
 
     def release_node(self, node, index):
@@ -153,19 +153,33 @@ def client_process(redis_nodes, resource, ttl, client_id):
     time.sleep(client_processes_waiting[client_id])
 
     redlock = Redlock(redis_nodes)
-    logger.info(f"\nClient-{client_id}: Attempting to acquire lock...")
+    logger.info(f"Client-{client_id}: Attempting to acquire lock...")
     lock_acquired, lock_id = redlock.acquire_lock(resource, ttl)
 
     if lock_acquired:
-        logger.info(f"\nClient-{client_id}: Lock acquired! Lock ID: {lock_id}")
+        logger.info(f"Client-{client_id}: Lock acquired! Lock ID: {lock_id}")
+        
         # Simulate critical section
-        time.sleep(3)  # Simulate some work
+        critical_section(client_id)
+        
+        # time.sleep(3)  # Simulate some work
         redlock.release_lock(resource, lock_id)
-        logger.info(f"\nClient-{client_id}: Lock released!")
-        logger.info(f"\nClient-{client_id}: Lock released!")
+        logger.info(f"Client-{client_id}: Lock released!")
+        logger.info(f"Client-{client_id}: Lock released!")
     else:
-        logger.warning(f"\nClient-{client_id}: Failed to acquire lock.")
+        logger.warning(f"Client-{client_id}: Failed to acquire lock.")
 
+def critical_section(client_id):
+    """
+    Simulates critical section by writing to a shared file.
+    """
+    greetings = ["Hi", "Hello", "Hey", "Greetings"]
+    greeting = random.choice(greetings)
+    
+    with open("shared_file.txt", "a") as f:
+        message = f"Client-{client_id}: {greeting}!\n"
+        f.write(message)
+        logger.info(f"Client-{client_id} wrote to file: {message.strip()}")
 
 if __name__ == "__main__":
     # Define Redis node addresses (host, port)
