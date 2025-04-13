@@ -59,7 +59,7 @@ class Redlock:
         :param redis_nodes: List of (host, port) tuples.
         """
         self.redis_nodes=redis_nodes
-        self.redis_clients = []
+        self.redis_hosts = []
         self.resource=None
         self.__lock_id=None
         self.retry_times = 3
@@ -75,8 +75,8 @@ class Redlock:
         # Initialize Redis nodes
         for host, port in self.redis_nodes:
             try:
-                client = redis.Redis(host=host,port=port)
-                self.redis_clients.append(client)
+                redis_host = redis.Redis(host=host,port=port)
+                self.redis_hosts.append(redis_host)
                 logger.info(f"Connected to Redis node {host}:{port}")
             except Exception as e:
                 logger.error(f"Failed to connect to Redis node {host}:{port}  : {e}")
@@ -97,7 +97,7 @@ class Redlock:
             start_time = time.monotonic()
 
             try:
-                for i, node in enumerate(self.redis_clients):
+                for i, node in enumerate(self.redis_hosts):
                     if self.acquire_node(node, i,ttl):
                         acquired_node_count += 1
                 
@@ -118,8 +118,8 @@ class Redlock:
                         return True, self.__lock_id
                 else:
                     logger.warning(f"Client-{client_index}: Failed to acquire lock on resource '{resource}', releasing partial locks")
-                    for i, node in enumerate(self.redis_clients):
-                        self.release_node(node, i)
+                    for i, node in enumerate(self.redis_hosts):
+                        self.release_node(node, i, client_index)
                     time.sleep(random.randint(0, DEFAULT_RETRY_DELAY) / 1000)
                     
             except Exception as e:
@@ -129,7 +129,7 @@ class Redlock:
         logger.warning(f"Client-{client_index}: Lock acquisition failed after retries for resource '{resource}'")
         return False, self.__lock_id
 
-    def release_lock(self, resource, lock_id):
+    def release_lock(self, resource, lock_id , client_index):
         """
         Release the distributed lock.
         :param resource: The name of the resource to unlock.
@@ -138,10 +138,10 @@ class Redlock:
         if not lock_id:
             return
         
-        for i, client in enumerate(self.redis_clients):
+        for i, client in enumerate(self.redis_hosts):
             try:
-                self.release_node(client, i + 1)
-                logger.info(f"Lock '{resource} with ID {lock_id} released on node {i + 1}")
+                self.release_node(client, i + 1, client_index)
+                logger.info(f"Client-{client_index}: Lock '{resource} with ID {lock_id} released on node {i + 1}")
             except Exception as e:
                 logger.error(f"Failed to release lock on node {i + 1}")
     
@@ -155,7 +155,7 @@ class Redlock:
             logger.error(f"Error acquiring lock on node {index}: {e}")
             return False
 
-    def release_node(self, node, index):
+    def release_node(self, node, index, client_index):
         """
         release a single redis node
         """
@@ -163,7 +163,7 @@ class Redlock:
             # The Lua script checks if the lock ID matches before deleting
             script = node.register_script(self.unlock_script)
             script(keys=[self.resource], args=[self.__lock_id])
-            logger.info(f"Lock released on node {index}")
+            logger.info(f"Client-{client_index}: Lock released on node {index}")
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
             logger.error(f"Error releasing lock on node {index}: {e}")
 
@@ -186,7 +186,7 @@ def client_process(redis_nodes, resource, ttl, client_id):
         # Simulate critical section
         critical_section(client_id)
         
-        redlock.release_lock(resource, lock_id)
+        redlock.release_lock(resource, lock_id, client_id)
         logger.info(f"Client-{client_id}: Lock released!")
         logger.info(f"Client-{client_id}: Lock released!")
     else:
